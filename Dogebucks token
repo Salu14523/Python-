@@ -1,0 +1,94 @@
+import telebot
+import sqlite3
+import time
+from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
+
+# Your BotFather token
+TOKEN = '7330387048:AAHZeYhoI1Z5Ur7fE5syR4HmajAa5B-rFEY'
+bot = telebot.TeleBot(TOKEN)
+
+# SQLite database setup
+conn = sqlite3.connect('doge_miner.db', check_same_thread=False)
+cursor = conn.cursor()
+cursor.execute('''CREATE TABLE IF NOT EXISTS users (
+    user_id INTEGER PRIMARY KEY,
+    doge_bucks INTEGER DEFAULT 0,
+    energy INTEGER DEFAULT 100,
+    last_energy_update INTEGER,
+    referrer_id INTEGER
+)''')
+conn.commit()
+
+# Utility functions
+def update_energy(user_id):
+    cursor.execute("SELECT energy, last_energy_update FROM users WHERE user_id = ?", (user_id,))
+    result = cursor.fetchone()
+    if result:
+        energy, last_update = result
+        current_time = int(time.time())
+        elapsed_minutes = (current_time - last_update) // 60
+        new_energy = min(100, energy + elapsed_minutes)
+        cursor.execute("UPDATE users SET energy = ?, last_energy_update = ? WHERE user_id = ?", 
+                       (new_energy, current_time, user_id))
+        conn.commit()
+        return new_energy
+    return 100
+
+def get_user_data(user_id):
+    cursor.execute("SELECT doge_bucks, energy FROM users WHERE user_id = ?", (user_id,))
+    result = cursor.fetchone()
+    return result if result else (0, 100)
+
+# Start command with referral handling
+@bot.message_handler(commands=['start'])
+def handle_start(message):
+    user_id = message.from_user.id
+    args = message.text.split()
+    referrer_id = int(args[1]) if len(args) > 1 and args[1].isdigit() else None
+
+    cursor.execute("INSERT OR IGNORE INTO users (user_id, last_energy_update) VALUES (?, ?)", 
+                   (user_id, int(time.time())))
+    conn.commit()
+
+    if referrer_id and referrer_id != user_id:
+        cursor.execute("UPDATE users SET doge_bucks = doge_bucks + 5000 WHERE user_id = ?", (referrer_id,))
+        cursor.execute("UPDATE users SET referrer_id = ? WHERE user_id = ?", (referrer_id, user_id))
+        conn.commit()
+        bot.send_message(referrer_id, "Woof! A friend joined with your link—here’s 5,000 DogeBucks!")
+
+    welcome_msg = ("Woof! Welcome to CryptoDoge Miner! I’m your mining pup—tap me to start earning DogeBucks "
+                   "and build your crypto empire!")
+    markup = InlineKeyboardMarkup()
+    markup.add(InlineKeyboardButton("Start Mining", callback_data="mine"))
+    markup.add(InlineKeyboardButton("Friends", callback_data="friends"))
+    bot.send_message(user_id, welcome_msg, reply_markup=markup)
+
+# Callback handler for buttons
+@bot.callback_query_handler(func=lambda call: True)
+def handle_callback(call):
+    user_id = call.from_user.id
+    energy = update_energy(user_id)
+    doge_bucks, _ = get_user_data(user_id)
+
+    if call.data == "mine":
+        if energy > 0:
+            cursor.execute("UPDATE users SET doge_bucks = doge_bucks + 1, energy = energy - 1 WHERE user_id = ?", 
+                           (user_id,))
+            conn.commit()
+            bot.answer_callback_query(call.id, "Mined 1 DogeBuck!")
+            status = f"DogeBucks: {doge_bucks + 1}\nEnergy: {energy - 1}/100"
+            markup = InlineKeyboardMarkup()
+            markup.add(InlineKeyboardButton("Tap to Mine", callback_data="mine"))
+            bot.edit_message_text(status, call.message.chat.id, call.message.message_id, reply_markup=markup)
+        else:
+            bot.answer_callback_query(call.id, "Out of energy! Wait for it to recharge.")
+
+    elif call.data == "friends":
+        referral_link = f"https://t.me/CryptoDogeMinerBot?start={user_id}"
+        msg = f"Invite friends and earn 5,000 DogeBucks per referral!\nYour link: {referral_link}"
+        markup = InlineKeyboardMarkup()
+        markup.add(InlineKeyboardButton("Back to Mining", callback_data="mine"))
+        bot.edit_message_text(msg, call.message.chat.id, call.message.message_id, reply_markup=markup)
+
+# Run the bot
+bot.polling()
